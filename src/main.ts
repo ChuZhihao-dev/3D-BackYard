@@ -28,6 +28,7 @@ import {
   X,
 } from "lucide";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { catalog, getProduct, type ProductDefinition } from "./catalog";
 import {
   clearModelCache,
@@ -509,8 +510,21 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.8));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
+renderer.toneMapping = THREE.NeutralToneMapping;
+renderer.toneMappingExposure = 1;
+
+let environmentTexture: THREE.Texture | null = null;
+
+function getEnvironmentTexture() {
+  if (!environmentTexture) {
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    const roomEnvironment = new RoomEnvironment();
+    environmentTexture = pmrem.fromScene(roomEnvironment, 0.04).texture;
+    roomEnvironment.dispose();
+    pmrem.dispose();
+  }
+  return environmentTexture;
+}
 
 const orbit = new OrbitControls(camera, renderer.domElement);
 orbit.enableDamping = true;
@@ -967,10 +981,42 @@ function createLoadingVisual(product: ProductDefinition) {
   return group;
 }
 
+function applyModelFidelity(root: THREE.Object3D) {
+  const maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
+  const environment = getEnvironmentTexture();
+  const seen = new Set<THREE.Texture>();
+  root.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return;
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    for (const material of materials) {
+      if (!(material instanceof THREE.MeshStandardMaterial)) continue;
+      material.envMap = environment;
+      material.envMapIntensity = 0.7;
+      material.needsUpdate = true;
+      const maps = [
+        material.map,
+        material.normalMap,
+        material.roughnessMap,
+        material.metalnessMap,
+        material.emissiveMap,
+        material.aoMap,
+      ];
+      for (const map of maps) {
+        if (!map || seen.has(map)) continue;
+        seen.add(map);
+        map.anisotropy = maxAnisotropy;
+        map.needsUpdate = true;
+      }
+    }
+  });
+}
+
 async function buildProductVisual(product: ProductDefinition) {
   if (product.modelAsset) {
     try {
-      return await instantiateUploadedModel(product.modelAsset);
+      const visual = await instantiateUploadedModel(product.modelAsset);
+      applyModelFidelity(visual);
+      return visual;
     } catch (error) {
       console.error(`Unable to load uploaded model for ${product.id}`, error);
       showToast(`${product.title} 的 GLB 加载失败，已使用默认模型`);

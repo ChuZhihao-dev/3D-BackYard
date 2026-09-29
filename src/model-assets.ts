@@ -230,7 +230,15 @@ async function parseModel(asset: UploadedModelAsset) {
 
   oriented.position.set(-center.x, -bounds.min.y, -center.z);
   const calibrated = new THREE.Group();
-  calibrated.scale.set(asset.widthM / size.x, asset.heightM / size.y, asset.depthM / size.z);
+  const axisScale = [
+    asset.widthM / size.x,
+    asset.heightM / size.y,
+    asset.depthM / size.z,
+  ].filter((value) => Number.isFinite(value) && value > 0);
+  const uniformScale = axisScale.length
+    ? axisScale.reduce((total, value) => total + value, 0) / axisScale.length
+    : 1;
+  calibrated.scale.setScalar(uniformScale);
   calibrated.add(oriented);
 
   const template = new THREE.Group();
