@@ -29,6 +29,8 @@ import {
 } from "lucide";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { catalog, getProduct, type ProductDefinition } from "./catalog";
 import {
   clearModelCache,
@@ -66,6 +68,42 @@ interface PlanSnapshot {
   yard: { widthM: number; depthM: number };
   placements: PlacementSnapshot[];
 }
+
+interface ShopifyCatalogProduct {
+  id: string;
+  productId: string;
+  variantId: string;
+  title: string;
+  variantTitle: string;
+  sku: string;
+  price: number;
+  imageUrl: string | null;
+  productUrl: string | null;
+  width: number;
+  depth: number;
+  height: number;
+  modelUrl: string | null;
+}
+
+interface ShopifyCatalogConfig {
+  type?: "backyard:catalog:v1";
+  products: ShopifyCatalogProduct[];
+  cartMode: "preview" | "shopify";
+}
+
+declare global {
+  interface Window {
+    __BACKYARD_CONFIG__?: ShopifyCatalogConfig;
+  }
+}
+
+let cartMode: ShopifyCatalogConfig["cartMode"] = "preview";
+let shopifyCatalogConfigured = false;
+let appInitialized = false;
+let resolveCatalogReady: (() => void) | undefined;
+const catalogReady = new Promise<void>((resolve) => {
+  resolveCatalogReady = resolve;
+});
 
 type PlacementGroup = THREE.Group & {
   userData: {
@@ -360,12 +398,15 @@ function renderCatalog() {
   });
 
   element<HTMLElement>("#catalog-count").textContent = `Outdoor collection · ${catalog.length} products`;
-  productList.innerHTML = products
-    .map(
+  productList.innerHTML = products.length
+    ? products
+        .map(
       (product) => `
         <article class="product-card" draggable="true" data-product-card="${escapeHtml(product.id)}">
           <div class="product-thumb" style="--thumb-bg:${product.thumbBg};--thumb-color:${product.thumbColor}">
-            <i data-lucide="${product.icon}" width="25" height="25"></i>
+            ${product.imageUrl
+              ? `<img src="${escapeHtml(product.imageUrl)}" alt="" loading="lazy" />`
+              : `<i data-lucide="${product.icon}" width="25" height="25"></i>`}
           </div>
           <div class="product-meta">
             <strong>${product.isCustom ? '<span class="model-badge local-badge">LOCAL</span>' : ""}${product.modelAsset ? '<span class="model-badge">GLB</span>' : ""}${escapeHtml(product.title)}</strong>
@@ -376,8 +417,14 @@ function renderCatalog() {
             <i data-lucide="plus" width="15" height="15"></i>
           </button>
         </article>`,
-    )
-    .join("");
+        )
+        .join("")
+    : `<div class="catalog-empty">
+        <strong>商品库为空</strong>
+        <span>${shopifyCatalogConfigured
+          ? "请返回 Shopify App 的 Products 页面，将商品添加到设计器。"
+          : "点击上方添加按钮，创建商品并上传 GLB。"}</span>
+      </div>`;
 
   productList.querySelectorAll<HTMLButtonElement>("[data-add-product]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -440,6 +487,94 @@ function buildCustomFallback(product: ProductDefinition) {
   group.add(object);
   return group;
 }
+
+const remoteModelCache = new Map<string, Promise<THREE.Group>>();
+
+async function instantiateRemoteModel(product: ProductDefinition) {
+  if (!product.modelUrl) throw new Error("Remote model URL is missing");
+  let pending = remoteModelCache.get(product.modelUrl);
+  if (!pending) {
+    pending = (async () => {
+      const loader = new GLTFLoader();
+      loader.setMeshoptDecoder(MeshoptDecoder);
+      const gltf = await loader.loadAsync(product.modelUrl!);
+      const root = gltf.scene;
+      root.updateMatrixWorld(true);
+      const bounds = new THREE.Box3().setFromObject(root);
+      const size = bounds.getSize(new THREE.Vector3());
+      if (![size.x, size.y, size.z].every((value) => Number.isFinite(value) && value > 0.0001)) {
+        throw new Error("Remote GLB has invalid bounds");
+      }
+      root.position.set(-bounds.min.x - size.x / 2, -bounds.min.y, -bounds.min.z - size.z / 2);
+      const calibrated = new THREE.Group();
+      calibrated.scale.set(product.width / size.x, product.height / size.y, product.depth / size.z);
+      calibrated.add(root);
+      return calibrated;
+    })();
+    remoteModelCache.set(product.modelUrl, pending);
+    pending.catch(() => remoteModelCache.delete(product.modelUrl!));
+  }
+
+  const instance = (await pending).clone(true);
+  instance.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return;
+    child.castShadow = true;
+    child.receiveShadow = true;
+    child.material = Array.isArray(child.material)
+      ? child.material.map((material) => material.clone())
+      : child.material.clone();
+  });
+  return instance;
+}
+
+function applyShopifyCatalog(config: ShopifyCatalogConfig) {
+  if (!Array.isArray(config.products)) return;
+  const category = catalog[0]?.category ?? Object.keys(customProductPresentation)[0] as ProductDefinition["category"];
+  const products = config.products.flatMap((item) => {
+    if (!item.variantId?.startsWith("gid://shopify/ProductVariant/") ||
+        ![item.width, item.depth, item.height, item.price].every(Number.isFinite)) return [];
+    let product: ProductDefinition;
+    product = {
+      id: `shopify-${item.variantId.split("/").pop()}`,
+      productId: item.productId,
+      variantId: item.variantId,
+      sku: item.sku,
+      title: item.variantTitle === "Default Title" ? item.title : `${item.title} - ${item.variantTitle}`,
+      category,
+      price: item.price,
+      width: item.width,
+      depth: item.depth,
+      height: item.height,
+      modelUrl: item.modelUrl ?? undefined,
+      imageUrl: item.imageUrl ?? undefined,
+      color: 0x66706a,
+      icon: "package-plus",
+      thumbBg: "#eef0ed",
+      thumbColor: "#405348",
+      build: () => buildCustomFallback(product),
+    };
+    return [product];
+  });
+
+  catalog.splice(0, catalog.length, ...products);
+  cartMode = config.cartMode;
+  shopifyCatalogConfigured = true;
+  resolveCatalogReady?.();
+  resolveCatalogReady = undefined;
+
+  if (appInitialized) {
+    void restorePlan({ schemaVersion: 1, yard: { widthM: yardWidth, depthM: yardDepth }, placements: [] });
+    renderCategories();
+    renderCatalog();
+  }
+}
+
+window.addEventListener("message", (event: MessageEvent<ShopifyCatalogConfig>) => {
+  if (event.origin !== window.location.origin || event.data?.type !== "backyard:catalog:v1") return;
+  applyShopifyCatalog(event.data);
+});
+
+if (window.__BACKYARD_CONFIG__) applyShopifyCatalog(window.__BACKYARD_CONFIG__);
 
 function createCustomProductDefinition(record: CustomProductRecord) {
   const presentation = customProductPresentation[record.category];
@@ -1022,6 +1157,16 @@ async function buildProductVisual(product: ProductDefinition) {
       showToast(`${product.title} 的 GLB 加载失败，已使用默认模型`);
     }
   }
+  if (product.modelUrl) {
+    try {
+      const visual = await instantiateRemoteModel(product);
+      applyModelFidelity(visual);
+      return visual;
+    } catch (error) {
+      console.error(`Unable to load remote model for ${product.id}`, error);
+      showToast(`${product.title} GLB 加载失败，已使用尺寸占位模型`);
+    }
+  }
   return product.build();
 }
 
@@ -1360,6 +1505,13 @@ function loadInitialPlan() {
   } catch {
     showToast("保存的方案无法读取，已载入示例布局");
   }
+  if (shopifyCatalogConfigured) {
+    return {
+      schemaVersion: 1,
+      yard: { widthM: 8, depthM: 6 },
+      placements: [],
+    } satisfies PlanSnapshot;
+  }
   return {
     schemaVersion: 1,
     yard: { widthM: 8, depthM: 6 },
@@ -1619,9 +1771,10 @@ function openModelManager(productId?: string) {
   modelProductInput.innerHTML = catalog
     .map((product) => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.title)} · ${escapeHtml(product.sku)}</option>`)
     .join("");
-  modelProductInput.value = productId && getProduct(productId) ? productId : catalog[0].id;
+  modelProductInput.value = productId && getProduct(productId) ? productId : (catalog[0]?.id ?? "");
+  bindModeButton.disabled = catalog.length === 0;
   saveModelButton.disabled = false;
-  setModelFormMode(productId ? "bind" : "create");
+  setModelFormMode(productId && getProduct(productId) ? "bind" : "create");
   modelModal.hidden = false;
   renderIcons();
 }
@@ -1834,20 +1987,50 @@ element<HTMLButtonElement>("#share-plan").addEventListener("click", async () => 
 });
 
 const cartModal = element<HTMLDivElement>("#cart-modal");
-element<HTMLButtonElement>("#add-to-cart").addEventListener("click", () => {
+const addToCartButton = element<HTMLButtonElement>("#add-to-cart");
+addToCartButton.addEventListener("click", async () => {
   const grouped = new Map<string, number>();
   placements().forEach((item) => grouped.set(item.userData.productId, (grouped.get(item.userData.productId) ?? 0) + 1));
+  const planId = crypto.randomUUID();
   const payload = {
     items: [...grouped.entries()].flatMap(([productId, quantity]) => {
       const product = getProduct(productId);
-      if (!product) return [];
+      if (!product?.variantId.startsWith("gid://shopify/ProductVariant/")) return [];
       return [{
         id: product.variantId.split("/").pop(),
         quantity,
-        properties: { _backyard_plan_id: "demo-plan", _sku: product.sku },
+        properties: { _backyard_plan_id: planId, _sku: product.sku },
       }];
     }),
   };
+
+  if (!payload.items.length) {
+    showToast("请先向方案中添加已关联的 Shopify 商品");
+    return;
+  }
+
+  if (cartMode === "shopify") {
+    addToCartButton.disabled = true;
+    try {
+      const response = await fetch("/cart/add.js", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => null) as { description?: string } | null;
+        throw new Error(error?.description ?? `Shopify cart returned ${response.status}`);
+      }
+      showToast("商品已加入购物车");
+      window.setTimeout(() => window.location.assign("/cart"), 350);
+    } catch (error) {
+      console.error("Unable to add Shopify cart lines", error);
+      showToast(error instanceof Error ? error.message : "加入购物车失败，请重试");
+      addToCartButton.disabled = false;
+    }
+    return;
+  }
+
   element<HTMLElement>("#cart-payload").textContent = JSON.stringify(payload, null, 2);
   cartModal.hidden = false;
 });
@@ -1895,6 +2078,12 @@ const resizeObserver = new ResizeObserver(() => {
 resizeObserver.observe(viewport);
 
 async function initializeApp() {
+  if (!window.__BACKYARD_CONFIG__ && new URLSearchParams(window.location.search).has("shopify-preview")) {
+    await Promise.race([
+      catalogReady,
+      new Promise<void>((resolve) => window.setTimeout(resolve, 1500)),
+    ]);
+  }
   await hydrateCustomProducts();
   await hydrateModelAssets();
   renderCategories();
@@ -1903,6 +2092,7 @@ async function initializeApp() {
   fitCamera();
   recordHistory();
   updateHistoryButtons();
+  appInitialized = true;
 }
 
 initializeApp().catch((error) => {

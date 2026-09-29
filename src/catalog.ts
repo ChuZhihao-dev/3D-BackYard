@@ -19,6 +19,8 @@ export interface ProductDefinition {
   thumbColor: string;
   build: () => THREE.Group;
   modelAsset?: UploadedModelAsset;
+  modelUrl?: string;
+  imageUrl?: string;
   isCustom?: boolean;
 }
 
