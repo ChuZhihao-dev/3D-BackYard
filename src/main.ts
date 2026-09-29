@@ -37,6 +37,8 @@ import {
   getStoredCustomProducts,
   getStoredModelAssets,
   instantiateUploadedModel,
+  MAX_FILE_SIZE,
+  MAX_FILE_SIZE_MB,
   prepareModelAsset,
   saveCustomProductWithModel,
   saveModelAsset,
@@ -224,7 +226,7 @@ app.innerHTML = `
           <input id="model-file" type="file" accept=".glb,model/gltf-binary" />
           <i data-lucide="upload" width="20" height="20"></i>
           <strong id="model-file-title">选择 GLB 文件</strong>
-          <span id="model-file-note">GLB 2.0 · 最大 25 MB · 文件保存在 IndexedDB</span>
+          <span id="model-file-note">GLB 2.0 · 最大 ${MAX_FILE_SIZE_MB} MB · 文件保存在 IndexedDB</span>
         </label>
         <div class="form-section-title">真实商品尺寸</div>
         <div class="form-grid form-grid-three">
@@ -1499,7 +1501,7 @@ function refreshModelForm() {
       setModelStatus("创建时将校验 GLB，并按真实尺寸分别校准 X / Y / Z。", "neutral");
     } else {
       element<HTMLElement>("#model-file-title").textContent = "选择新商品的 GLB 文件";
-      element<HTMLElement>("#model-file-note").textContent = "GLB 2.0 · 最大 25 MB · 文件保存在 IndexedDB";
+      element<HTMLElement>("#model-file-note").textContent = `GLB 2.0 · 最大 ${MAX_FILE_SIZE_MB} MB · 文件保存在 IndexedDB`;
       setModelStatus("填写商品信息并上传 GLB，创建后会自动加入 Yard。", "neutral");
     }
     return;
@@ -1533,7 +1535,7 @@ function refreshModelForm() {
     );
   } else {
     element<HTMLElement>("#model-file-title").textContent = "选择 GLB 文件";
-    element<HTMLElement>("#model-file-note").textContent = "GLB 2.0 · 最大 25 MB · 文件保存在 IndexedDB";
+    element<HTMLElement>("#model-file-note").textContent = `GLB 2.0 · 最大 ${MAX_FILE_SIZE_MB} MB · 文件保存在 IndexedDB`;
     setModelStatus("上传后会自动居中、落地，并绑定到所选模拟商品。", "neutral");
   }
 }
@@ -1606,10 +1608,10 @@ modelFileInput.addEventListener("change", () => {
     setModelStatus("请选择扩展名为 .glb 的 glTF 2.0 文件。", "error");
     return;
   }
-  if (file.size > 25 * 1024 * 1024) {
+  if (file.size > MAX_FILE_SIZE) {
     pendingModelFile = null;
     modelFileInput.value = "";
-    setModelStatus("文件超过 25 MB，请优化后重新上传。", "error");
+    setModelStatus(`文件超过 ${MAX_FILE_SIZE_MB} MB，请优化后重新上传。`, "error");
     return;
   }
   pendingModelFile = file;

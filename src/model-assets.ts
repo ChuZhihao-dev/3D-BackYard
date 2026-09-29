@@ -39,7 +39,8 @@ export interface CustomProductRecord {
 const DATABASE_NAME = "backyard-designer-demo";
 const STORE_NAME = "product-models";
 const PRODUCT_STORE_NAME = "custom-products";
-const MAX_FILE_SIZE = 25 * 1024 * 1024;
+export const MAX_FILE_SIZE = 128 * 1024 * 1024;
+export const MAX_FILE_SIZE_MB = Math.round(MAX_FILE_SIZE / (1024 * 1024));
 const MAX_TRIANGLES = 250_000;
 const MAX_MATERIALS = 24;
 const templateCache = new Map<string, Promise<{ template: THREE.Group; stats: ModelStats }>>();
@@ -206,7 +207,7 @@ function rememberMaterialDefaults(material: THREE.Material) {
 }
 
 async function parseModel(asset: UploadedModelAsset) {
-  if (asset.blob.size > MAX_FILE_SIZE) throw new Error("GLB 不能超过 25 MB");
+  if (asset.blob.size > MAX_FILE_SIZE) throw new Error(`GLB 不能超过 ${MAX_FILE_SIZE_MB} MB`);
   const buffer = await asset.blob.arrayBuffer();
   validateGlbDocument(buffer);
 
