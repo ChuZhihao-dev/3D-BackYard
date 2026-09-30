@@ -138,12 +138,84 @@ mobilePage.on("console", (message) => {
 });
 mobilePage.on("pageerror", (error) => errors.push(`mobile page: ${error.message}`));
 await mobilePage.goto(baseUrl, { waitUntil: "networkidle" });
+const mobilePanelsInitiallyClosed = await mobilePage.evaluate(() =>
+  !document.querySelector("#catalog-panel")?.classList.contains("open") &&
+  !document.querySelector("#plan-panel")?.classList.contains("open"),
+);
+await mobilePage.locator("#mobile-plan-toggle").click();
+await mobilePage.locator("#plan-panel.open").waitFor();
+await mobilePage.waitForTimeout(250);
+const mobilePlanBounds = await mobilePage.locator("#plan-panel").boundingBox();
+const mobileCartButtonsFit = await mobilePage.locator(".cart-actions").evaluate((element) =>
+  [...element.children].every((child) => child.scrollWidth <= child.clientWidth),
+);
+await mobilePage.screenshot({ path: fileURLToPath(new URL("mobile-plan-drawer.png", outputDir)), fullPage: true });
+await mobilePage.locator("#close-plan-panel").click();
+const mobilePlanClosed = !(await mobilePage.locator("#plan-panel").evaluate((element) => element.classList.contains("open")));
+
+await mobilePage.locator("#mobile-catalog-toggle").click();
+await mobilePage.locator("#catalog-panel.open").waitFor();
+await mobilePage.waitForTimeout(250);
+await mobilePage.screenshot({ path: fileURLToPath(new URL("mobile-catalog-drawer.png", outputDir)), fullPage: true });
 await mobilePage.locator("#open-model-manager").click();
 const mobileModalBounds = await mobilePage.locator("#model-form").boundingBox();
 if (!mobileModalBounds || mobileModalBounds.width > 390 || mobileModalBounds.height > 844) {
   errors.push(`mobile: model form exceeds viewport ${JSON.stringify(mobileModalBounds)}`);
 }
 await mobilePage.screenshot({ path: fileURLToPath(new URL("model-upload-mobile.png", outputDir)), fullPage: true });
+await mobilePage.locator("#close-model-modal").click();
+await mobilePage.locator("#model-modal").waitFor({ state: "hidden" });
+const mobileCloseButtonWorks = await mobilePage.locator("#model-modal").isHidden();
+
+await mobilePage.locator("#mobile-catalog-toggle").click();
+await mobilePage.locator("#open-model-manager").click();
+await mobilePage.locator("#cancel-model-modal").click();
+await mobilePage.locator("#model-modal").waitFor({ state: "hidden" });
+const mobileCancelButtonWorks = await mobilePage.locator("#model-modal").isHidden();
+
+await mobilePage.locator("#mobile-catalog-toggle").click();
+await mobilePage.locator("#open-model-manager").click();
+await mobilePage.locator("#model-modal").click({ position: { x: 2, y: 2 } });
+await mobilePage.locator("#model-modal").waitFor({ state: "hidden" });
+const mobileBackdropCloseWorks = await mobilePage.locator("#model-modal").isHidden();
+
+await mobilePage.evaluate(() => window.postMessage({
+  type: "backyard:catalog:v1",
+  cartMode: "shopify",
+  products: [{
+    id: "binding-mobile",
+    productId: "gid://shopify/Product/1001",
+    variantId: "gid://shopify/ProductVariant/2002",
+    title: "Outdoor Lounge Chair",
+    variantTitle: "Default Title",
+    sku: "BYD-CHAIR-001",
+    price: 199,
+    imageUrl: null,
+    productUrl: null,
+    width: 0.9,
+    depth: 0.95,
+    height: 1.05,
+    modelUrl: null,
+  }],
+}, window.location.origin));
+await mobilePage.locator("#mobile-plan-toggle").click();
+await mobilePage.waitForTimeout(250);
+const mobileShopifyCartButtonsFit = await mobilePage.locator(".cart-actions").evaluate((element) =>
+  [...element.children].every((child) => {
+    const style = getComputedStyle(child);
+    return style.display !== "none" && child.scrollWidth <= child.clientWidth;
+  }),
+);
+await mobilePage.screenshot({ path: fileURLToPath(new URL("mobile-shopify-cart-actions.png", outputDir)), fullPage: true });
+
+if (!mobilePanelsInitiallyClosed) errors.push("mobile: drawers should be collapsed on first load");
+if (!mobilePlanBounds || mobilePlanBounds.width > 390) errors.push(`mobile: plan drawer exceeds viewport ${JSON.stringify(mobilePlanBounds)}`);
+if (!mobileCartButtonsFit) errors.push("mobile: cart action text overflows its controls");
+if (!mobilePlanClosed) errors.push("mobile: plan drawer close button did not collapse the drawer");
+if (!mobileCloseButtonWorks) errors.push("mobile: model dialog close icon did not close the dialog");
+if (!mobileCancelButtonWorks) errors.push("mobile: model dialog cancel button did not close the dialog");
+if (!mobileBackdropCloseWorks) errors.push("mobile: model dialog backdrop did not close the dialog");
+if (!mobileShopifyCartButtonsFit) errors.push("mobile: Shopify cart action text overflows its controls");
 await mobileContext.close();
 
 const result = {
@@ -152,6 +224,13 @@ const result = {
   persistedAfterReload: restoredStatus?.includes("12 个三角面") ?? false,
   removedProduct,
   mobileModalFits: Boolean(mobileModalBounds && mobileModalBounds.width <= 390 && mobileModalBounds.height <= 844),
+  mobilePanelsInitiallyClosed,
+  mobileCartButtonsFit,
+  mobilePlanClosed,
+  mobileCloseButtonWorks,
+  mobileCancelButtonWorks,
+  mobileBackdropCloseWorks,
+  mobileShopifyCartButtonsFit,
   errors,
 };
 await browser.close();

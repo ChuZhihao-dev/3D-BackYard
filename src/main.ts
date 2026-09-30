@@ -94,6 +94,11 @@ interface ShopifyCatalogConfig {
 declare global {
   interface Window {
     __BACKYARD_CONFIG__?: ShopifyCatalogConfig;
+    Shopify?: {
+      routes?: {
+        root?: string;
+      };
+    };
   }
 }
 
@@ -162,7 +167,10 @@ app.innerHTML = `
             <h2>商品库</h2>
             <p id="catalog-count">Outdoor collection · 5 products</p>
           </div>
-          <button class="icon-btn" id="open-model-manager" title="添加商品或管理 3D 模型" type="button"><i data-lucide="package-plus" width="15" height="15"></i></button>
+          <div class="panel-head-actions">
+            <button class="icon-btn mobile-drawer-close" id="close-catalog-panel" title="收起商品库" type="button"><i data-lucide="x" width="16" height="16"></i></button>
+            <button class="icon-btn" id="open-model-manager" title="添加商品或管理 3D 模型" type="button"><i data-lucide="package-plus" width="15" height="15"></i></button>
+          </div>
         </div>
         <div class="search-wrap">
           <i data-lucide="search" width="15" height="15"></i>
@@ -179,9 +187,14 @@ app.innerHTML = `
           <span class="status-dot"></span>
           <span id="status-text">布局有效</span>
         </div>
-        <button class="text-btn mobile-catalog-toggle" id="mobile-catalog-toggle" type="button">
-          <i data-lucide="package-plus" width="15" height="15"></i>添加商品
-        </button>
+        <div class="mobile-panel-actions">
+          <button class="text-btn mobile-catalog-toggle" id="mobile-catalog-toggle" type="button" aria-controls="catalog-panel" aria-expanded="false">
+            <i data-lucide="package-plus" width="15" height="15"></i>商品
+          </button>
+          <button class="text-btn mobile-plan-toggle" id="mobile-plan-toggle" type="button" aria-controls="plan-panel" aria-expanded="false">
+            <i data-lucide="shopping-bag" width="15" height="15"></i>方案
+          </button>
+        </div>
         <div class="view-controls">
           <button class="icon-btn" id="top-view" title="顶视图" type="button"><i data-lucide="map" width="16" height="16"></i></button>
           <button class="icon-btn active" id="toggle-grid" title="显示或隐藏网格" type="button"><i data-lucide="grid-3x3" width="16" height="16"></i></button>
@@ -197,10 +210,13 @@ app.innerHTML = `
         </div>
       </section>
 
-      <aside class="panel plan-panel">
-        <div class="panel-head">
-          <h2>方案摘要</h2>
-          <p>Backyard Plan · 自动保存到本机</p>
+      <aside class="panel plan-panel" id="plan-panel">
+        <div class="panel-head panel-head-row">
+          <div>
+            <h2>方案摘要</h2>
+            <p>Backyard Plan · 自动保存到本机</p>
+          </div>
+          <button class="icon-btn mobile-drawer-close" id="close-plan-panel" title="收起方案摘要" type="button"><i data-lucide="x" width="16" height="16"></i></button>
         </div>
         <div class="summary">
           <div class="metric"><strong id="yard-area">48.0</strong><span>面积 m²</span></div>
@@ -214,10 +230,14 @@ app.innerHTML = `
         <div class="bom-list" id="bom-list"><div class="bom-empty">添加商品后，这里会生成 BOM。</div></div>
         <div class="cart-area">
           <div class="cart-total"><span>产品合计</span><strong id="cart-total">$0.00</strong></div>
-          <button class="primary-btn" id="add-to-cart" type="button"><i data-lucide="shopping-cart" width="15" height="15"></i>加入购物车</button>
+          <div class="cart-actions">
+            <button class="primary-btn" id="add-to-cart" type="button"><i data-lucide="shopping-cart" width="15" height="15"></i>加入购物车</button>
+            <a class="text-btn cart-link" id="view-cart" href="/cart" target="_blank" rel="noopener" hidden><i data-lucide="shopping-bag" width="15" height="15"></i>查看购物车</a>
+          </div>
           <p class="cart-note">当前展示 Shopify Ajax Cart 请求预览。</p>
         </div>
       </aside>
+      <button class="mobile-drawer-scrim" id="mobile-drawer-scrim" type="button" aria-label="关闭面板" hidden></button>
     </div>
   </div>
   <div class="toast" id="toast" role="status"></div>
@@ -313,6 +333,10 @@ const statusText = element<HTMLSpanElement>("#status-text");
 const yardWidthInput = element<HTMLInputElement>("#yard-width");
 const yardDepthInput = element<HTMLInputElement>("#yard-depth");
 const catalogPanel = element<HTMLElement>("#catalog-panel");
+const planPanel = element<HTMLElement>("#plan-panel");
+const mobileCatalogToggle = element<HTMLButtonElement>("#mobile-catalog-toggle");
+const mobilePlanToggle = element<HTMLButtonElement>("#mobile-plan-toggle");
+const mobileDrawerScrim = element<HTMLButtonElement>("#mobile-drawer-scrim");
 const modelModal = element<HTMLDivElement>("#model-modal");
 const modelForm = element<HTMLFormElement>("#model-form");
 const modelProductInput = element<HTMLSelectElement>("#model-product");
@@ -558,6 +582,7 @@ function applyShopifyCatalog(config: ShopifyCatalogConfig) {
 
   catalog.splice(0, catalog.length, ...products);
   cartMode = config.cartMode;
+  updateCartModeUi();
   shopifyCatalogConfigured = true;
   resolveCatalogReady?.();
   resolveCatalogReady = undefined;
@@ -1216,7 +1241,7 @@ async function addProduct(product: ProductDefinition, position?: THREE.Vector3) 
   selectPlacement(group);
   recordHistory();
   refreshPlanUi();
-  catalogPanel.classList.remove("open");
+  setMobileDrawer(null);
   showToast(`${product.title} 已添加`);
 }
 
@@ -1677,7 +1702,28 @@ element<HTMLButtonElement>("#toggle-grid").addEventListener("click", (event) => 
   yardLayer.children.filter((child) => child.userData.isGrid).forEach((child) => (child.visible = gridVisible));
   (event.currentTarget as HTMLButtonElement).classList.toggle("active", gridVisible);
 });
-element<HTMLButtonElement>("#mobile-catalog-toggle").addEventListener("click", () => catalogPanel.classList.toggle("open"));
+function setMobileDrawer(drawer: "catalog" | "plan" | null) {
+  const catalogOpen = drawer === "catalog";
+  const planOpen = drawer === "plan";
+  catalogPanel.classList.toggle("open", catalogOpen);
+  planPanel.classList.toggle("open", planOpen);
+  mobileCatalogToggle.setAttribute("aria-expanded", String(catalogOpen));
+  mobilePlanToggle.setAttribute("aria-expanded", String(planOpen));
+  mobileDrawerScrim.hidden = !catalogOpen && !planOpen;
+}
+
+mobileCatalogToggle.addEventListener("click", () => {
+  setMobileDrawer(catalogPanel.classList.contains("open") ? null : "catalog");
+});
+mobilePlanToggle.addEventListener("click", () => {
+  setMobileDrawer(planPanel.classList.contains("open") ? null : "plan");
+});
+element<HTMLButtonElement>("#close-catalog-panel").addEventListener("click", () => setMobileDrawer(null));
+element<HTMLButtonElement>("#close-plan-panel").addEventListener("click", () => setMobileDrawer(null));
+mobileDrawerScrim.addEventListener("click", () => setMobileDrawer(null));
+window.matchMedia("(max-width: 800px)").addEventListener("change", (event) => {
+  if (!event.matches) setMobileDrawer(null);
+});
 productSearch.addEventListener("input", renderCatalog);
 
 function currentModelProduct() {
@@ -1768,6 +1814,7 @@ function setModelFormMode(mode: "create" | "bind") {
 }
 
 function openModelManager(productId?: string) {
+  setMobileDrawer(null);
   modelProductInput.innerHTML = catalog
     .map((product) => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.title)} · ${escapeHtml(product.sku)}</option>`)
     .join("");
@@ -1788,8 +1835,15 @@ function closeModelManager() {
 element<HTMLButtonElement>("#open-model-manager").addEventListener("click", () => openModelManager());
 createModeButton.addEventListener("click", () => setModelFormMode("create"));
 bindModeButton.addEventListener("click", () => setModelFormMode("bind"));
-element<HTMLButtonElement>("#close-model-modal").addEventListener("click", closeModelManager);
-element<HTMLButtonElement>("#cancel-model-modal").addEventListener("click", closeModelManager);
+element<HTMLButtonElement>("#close-model-modal").addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  closeModelManager();
+});
+element<HTMLButtonElement>("#cancel-model-modal").addEventListener("click", (event) => {
+  event.preventDefault();
+  closeModelManager();
+});
 modelModal.addEventListener("click", (event) => {
   if (event.target === modelModal) closeModelManager();
 });
@@ -1988,6 +2042,33 @@ element<HTMLButtonElement>("#share-plan").addEventListener("click", async () => 
 
 const cartModal = element<HTMLDivElement>("#cart-modal");
 const addToCartButton = element<HTMLButtonElement>("#add-to-cart");
+const viewCartLink = element<HTMLAnchorElement>("#view-cart");
+
+function shopifyRoutesRoot() {
+  const configuredRoot = window.Shopify?.routes?.root;
+  if (configuredRoot?.startsWith("/")) {
+    return configuredRoot.endsWith("/") ? configuredRoot : `${configuredRoot}/`;
+  }
+  const proxyMarkerIndex = window.location.pathname.indexOf("/apps/");
+  return proxyMarkerIndex > 0
+    ? window.location.pathname.slice(0, proxyMarkerIndex + 1)
+    : "/";
+}
+
+function updateCartModeUi() {
+  const link = document.querySelector<HTMLAnchorElement>("#view-cart");
+  const note = document.querySelector<HTMLElement>(".cart-note");
+  if (!link || !note) return;
+  const isShopifyStorefront = cartMode === "shopify";
+  link.hidden = !isShopifyStorefront;
+  link.href = `${shopifyRoutesRoot()}cart`;
+  note.textContent = isShopifyStorefront
+    ? "加入后可继续设计，购物车将在新标签页打开。"
+    : "当前展示 Shopify Ajax Cart 请求预览。";
+}
+
+updateCartModeUi();
+
 addToCartButton.addEventListener("click", async () => {
   const grouped = new Map<string, number>();
   placements().forEach((item) => grouped.set(item.userData.productId, (grouped.get(item.userData.productId) ?? 0) + 1));
@@ -2012,7 +2093,7 @@ addToCartButton.addEventListener("click", async () => {
   if (cartMode === "shopify") {
     addToCartButton.disabled = true;
     try {
-      const response = await fetch("/cart/add.js", {
+      const response = await fetch(`${shopifyRoutesRoot()}cart/add.js`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify(payload),
@@ -2021,11 +2102,12 @@ addToCartButton.addEventListener("click", async () => {
         const error = await response.json().catch(() => null) as { description?: string } | null;
         throw new Error(error?.description ?? `Shopify cart returned ${response.status}`);
       }
-      showToast("商品已加入购物车");
-      window.setTimeout(() => window.location.assign("/cart"), 350);
+      showToast("商品已加入购物车，你可以继续设计或查看购物车");
+      viewCartLink.focus();
     } catch (error) {
       console.error("Unable to add Shopify cart lines", error);
       showToast(error instanceof Error ? error.message : "加入购物车失败，请重试");
+    } finally {
       addToCartButton.disabled = false;
     }
     return;
@@ -2043,6 +2125,13 @@ window.addEventListener("keydown", (event) => {
   const target = event.target as HTMLElement;
   if (event.key === "Escape" && !modelModal.hidden) {
     closeModelManager();
+    return;
+  }
+  if (
+    event.key === "Escape" &&
+    (catalogPanel.classList.contains("open") || planPanel.classList.contains("open"))
+  ) {
+    setMobileDrawer(null);
     return;
   }
   if (target.matches("input, textarea, select") || !modelModal.hidden) return;
