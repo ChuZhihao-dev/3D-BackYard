@@ -61,13 +61,31 @@ interface PlacementSnapshot {
   x: number;
   z: number;
   rotation: number;
+  scale?: number;
 }
 
 interface PlanSnapshot {
-  schemaVersion: 1;
+  schemaVersion: 2;
   yard: { widthM: number; depthM: number };
   placements: PlacementSnapshot[];
 }
+
+interface SavedPlanRecord {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  snapshot: PlanSnapshot;
+}
+
+interface DraftPlanRecord {
+  planId: string;
+  snapshot: PlanSnapshot;
+}
+
+const PLAN_STORE_KEY = "backyard-demo-plans";
+const ACTIVE_PLAN_KEY = "backyard-demo-active-plan";
+const DRAFT_PLAN_KEY = "backyard-demo-draft";
 
 interface ShopifyCatalogProduct {
   id: string;
@@ -218,6 +236,21 @@ app.innerHTML = `
           </div>
           <button class="icon-btn mobile-drawer-close" id="close-plan-panel" title="收起方案摘要" type="button"><i data-lucide="x" width="16" height="16"></i></button>
         </div>
+        <div class="active-plan-bar">
+          <div class="active-plan-copy">
+            <strong id="active-plan-name">未命名方案</strong>
+            <span id="plan-dirty-state">已保存</span>
+          </div>
+          <div class="active-plan-actions">
+            <button class="text-btn plan-picker-btn" id="open-plans" type="button"><i data-lucide="layers" width="14" height="14"></i><span>My plans</span><span class="plan-count-badge" id="saved-plan-count">0</span></button>
+            <button class="icon-btn" id="new-plan" title="新建方案" type="button"><i data-lucide="plus" width="15" height="15"></i></button>
+            <button class="icon-btn" id="save-as-plan" title="另存为" type="button"><i data-lucide="copy" width="15" height="15"></i></button>
+          </div>
+        </div>
+        <div class="saved-plans-section" hidden>
+          <div class="section-title saved-plans-title"><strong>我的方案</strong><span id="saved-plan-count-inline">0</span></div>
+          <div class="saved-plan-list" id="saved-plan-list"></div>
+        </div>
         <div class="summary">
           <div class="metric"><strong id="yard-area">48.0</strong><span>面积 m²</span></div>
           <div class="metric"><strong id="space-usage">0%</strong><span>占地率</span></div>
@@ -252,6 +285,22 @@ app.innerHTML = `
       </div>
       <div class="modal-body"><pre class="payload" id="cart-payload"></pre></div>
     </div>
+  </div>
+  <div class="modal-backdrop" id="plans-modal" hidden>
+    <section class="modal plans-modal" role="dialog" aria-modal="true" aria-labelledby="plans-modal-title">
+      <div class="modal-head">
+        <div>
+          <h2 id="plans-modal-title">我的方案</h2>
+          <p>选择方案继续编辑，或管理已保存的布局。</p>
+        </div>
+        <button class="icon-btn" id="close-plans-modal" title="关闭" type="button"><i data-lucide="x" width="16" height="16"></i></button>
+      </div>
+      <div class="plans-modal-toolbar">
+        <button class="primary-btn" id="modal-new-plan" type="button"><i data-lucide="plus" width="15" height="15"></i>新建方案</button>
+        <button class="text-btn" id="modal-save-as-plan" type="button"><i data-lucide="copy" width="15" height="15"></i>另存为</button>
+      </div>
+      <div class="plans-modal-body"><div class="saved-plan-list" id="modal-plan-list"></div></div>
+    </section>
   </div>
   <div class="modal-backdrop" id="model-modal" hidden>
     <form class="modal model-modal" id="model-form" role="dialog" aria-modal="true" aria-labelledby="model-modal-title">
@@ -334,6 +383,16 @@ const yardWidthInput = element<HTMLInputElement>("#yard-width");
 const yardDepthInput = element<HTMLInputElement>("#yard-depth");
 const catalogPanel = element<HTMLElement>("#catalog-panel");
 const planPanel = element<HTMLElement>("#plan-panel");
+const activePlanNameEl = element<HTMLElement>("#active-plan-name");
+const planDirtyState = element<HTMLElement>("#plan-dirty-state");
+const savedPlanCount = element<HTMLElement>("#saved-plan-count");
+const savedPlanList = element<HTMLDivElement>("#saved-plan-list");
+const modalPlanList = element<HTMLDivElement>("#modal-plan-list");
+const plansModal = element<HTMLDivElement>("#plans-modal");
+const openPlansButton = element<HTMLButtonElement>("#open-plans");
+const closePlansButton = element<HTMLButtonElement>("#close-plans-modal");
+const modalNewPlanButton = element<HTMLButtonElement>("#modal-new-plan");
+const modalSaveAsPlanButton = element<HTMLButtonElement>("#modal-save-as-plan");
 const mobileCatalogToggle = element<HTMLButtonElement>("#mobile-catalog-toggle");
 const mobilePlanToggle = element<HTMLButtonElement>("#mobile-plan-toggle");
 const mobileDrawerScrim = element<HTMLButtonElement>("#mobile-drawer-scrim");
@@ -363,6 +422,10 @@ let toastTimer = 0;
 let interactionMode: "translate" | "rotate" = "translate";
 let pendingModelFile: File | null = null;
 let modelFormMode: "create" | "bind" = "create";
+let savedPlans: SavedPlanRecord[] = [];
+let activePlanId = "";
+let activePlanName = "未命名方案";
+let planDirty = false;
 
 function renderIcons() {
   createIcons({
@@ -588,7 +651,7 @@ function applyShopifyCatalog(config: ShopifyCatalogConfig) {
   resolveCatalogReady = undefined;
 
   if (appInitialized) {
-    void restorePlan({ schemaVersion: 1, yard: { widthM: yardWidth, depthM: yardDepth }, placements: [] });
+    void restorePlan({ schemaVersion: 2, yard: { widthM: yardWidth, depthM: yardDepth }, placements: [] });
     renderCategories();
     renderCatalog();
   }
@@ -1095,8 +1158,8 @@ function placementRect(group: PlacementGroup): FootprintRect {
   return {
     x: group.position.x,
     z: group.position.z,
-    width: product.width,
-    depth: product.depth,
+    width: product.width * group.scale.x,
+    depth: product.depth * group.scale.z,
     rotation: group.rotation.y,
   };
 }
@@ -1205,6 +1268,7 @@ async function createPlacement(product: ProductDefinition, snapshot?: PlacementS
   const [defaultX, defaultZ] = findOpenPosition(product);
   group.position.set(snapshot?.x ?? defaultX, 0, snapshot?.z ?? defaultZ);
   group.rotation.y = snapshot?.rotation ?? 0;
+  group.scale.setScalar(snapshot?.scale ?? 1);
   placementLayer.add(group);
   const loadingVisual = createLoadingVisual(product);
   group.add(loadingVisual);
@@ -1254,6 +1318,7 @@ async function rebuildProductPlacements(product: ProductDefinition, addWhenEmpty
     x: item.position.x,
     z: item.position.z,
     rotation: item.rotation.y,
+    scale: item.scale.x,
   }));
   if (selectedId) selectPlacement(null);
   existing.forEach((item) => {
@@ -1308,6 +1373,7 @@ async function duplicateSelected() {
     x: selected.position.x + 0.35,
     z: selected.position.z + 0.35,
     rotation: selected.rotation.y,
+    scale: selected.scale.x,
   });
   selectPlacement(copy);
   recordHistory();
@@ -1358,12 +1424,29 @@ function refreshSelectionPanel() {
       <div><span>X 坐标</span><strong>${selected.position.x.toFixed(2)} m</strong></div>
       <div><span>Z 坐标</span><strong>${selected.position.z.toFixed(2)} m</strong></div>
     </div>
+    <label class="scale-control" for="selection-scale">
+      <span>模型比例</span>
+      <input id="selection-scale" type="range" min="0.5" max="2" step="0.05" value="${selected.scale.x.toFixed(2)}" />
+      <strong id="selection-scale-value">${Math.round(selected.scale.x * 100)}%</strong>
+    </label>
     <div class="selection-actions">
       <button class="text-btn" id="duplicate-selected" type="button"><i data-lucide="copy" width="14" height="14"></i>复制</button>
       <button class="text-btn danger-btn" id="delete-selected" type="button"><i data-lucide="trash-2" width="14" height="14"></i>删除</button>
     </div>`;
   element<HTMLButtonElement>("#duplicate-selected").addEventListener("click", duplicateSelected);
   element<HTMLButtonElement>("#delete-selected").addEventListener("click", deleteSelected);
+  const scaleInput = element<HTMLInputElement>("#selection-scale");
+  scaleInput.addEventListener("input", () => {
+    if (!selected) return;
+    const scale = Number(scaleInput.value);
+    selected.scale.setScalar(scale);
+    element<HTMLElement>("#selection-scale-value").textContent = `${Math.round(scale * 100)}%`;
+    selectionBox.setFromObject(selected);
+  });
+  scaleInput.addEventListener("change", () => {
+    refreshPlanUi();
+    recordHistory();
+  });
   renderIcons();
 }
 
@@ -1440,7 +1523,7 @@ function refreshPlanUi() {
 
 function serializePlan(): PlanSnapshot {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     yard: { widthM: yardWidth, depthM: yardDepth },
     placements: placements().map((item) => ({
       instanceId: item.userData.instanceId,
@@ -1448,7 +1531,30 @@ function serializePlan(): PlanSnapshot {
       x: Number(item.position.x.toFixed(4)),
       z: Number(item.position.z.toFixed(4)),
       rotation: Number(item.rotation.y.toFixed(5)),
+      scale: Number(item.scale.x.toFixed(4)),
     })),
+  };
+}
+
+function normalizePlan(value: Partial<PlanSnapshot>): PlanSnapshot {
+  return {
+    schemaVersion: 2,
+    yard: {
+      widthM: Number(value.yard?.widthM) || 8,
+      depthM: Number(value.yard?.depthM) || 6,
+    },
+    placements: Array.isArray(value.placements)
+      ? value.placements
+          .filter((item): item is PlacementSnapshot => Boolean(item?.productId))
+          .map((item) => ({
+            instanceId: item.instanceId || crypto.randomUUID(),
+            productId: item.productId,
+            x: Number(item.x) || 0,
+            z: Number(item.z) || 0,
+            rotation: Number(item.rotation) || 0,
+            scale: Number(item.scale) > 0 ? Number(item.scale) : 1,
+          }))
+      : [],
   };
 }
 
@@ -1465,7 +1571,10 @@ async function restorePlan(plan: PlanSnapshot) {
   }
   await Promise.all(plan.placements.map((snapshot) => {
     const product = getProduct(snapshot.productId);
-    return product ? createPlacement(product, snapshot) : Promise.resolve(null);
+    return product ? createPlacement(product, snapshot).then((group) => {
+      group.scale.setScalar(snapshot.scale ?? 1);
+      return group;
+    }) : Promise.resolve(null);
   }));
   refreshPlanUi();
 }
@@ -1477,7 +1586,53 @@ function clonePlan(plan: PlanSnapshot) {
   return JSON.parse(JSON.stringify(plan)) as PlanSnapshot;
 }
 
-function recordHistory() {
+function persistDraft() {
+  if (!activePlanId) return;
+  const draft: DraftPlanRecord = { planId: activePlanId, snapshot: serializePlan() };
+  localStorage.setItem(DRAFT_PLAN_KEY, JSON.stringify(draft));
+  localStorage.setItem(ACTIVE_PLAN_KEY, activePlanId);
+}
+
+function updatePlanStateUi() {
+  activePlanNameEl.textContent = activePlanName;
+  planDirtyState.textContent = planDirty ? "有未保存修改" : "已保存";
+  planDirtyState.classList.toggle("dirty", planDirty);
+  savedPlanCount.textContent = `${savedPlans.length} 个`;
+}
+
+function persistPlanStore() {
+  localStorage.setItem(PLAN_STORE_KEY, JSON.stringify(savedPlans));
+  localStorage.setItem(ACTIVE_PLAN_KEY, activePlanId);
+}
+
+function renderSavedPlans() {
+  updatePlanStateUi();
+  const targets = [savedPlanList, modalPlanList];
+  if (!savedPlans.length) {
+    targets.forEach((target) => { target.innerHTML = '<div class="saved-plan-empty">保存后，方案会显示在这里</div>'; });
+    return;
+  }
+  const markup = savedPlans.map((plan) => `
+    <div class="saved-plan-row${plan.id === activePlanId ? " active" : ""}" data-plan-row="${escapeHtml(plan.id)}">
+      <button class="saved-plan-select" data-plan-load="${escapeHtml(plan.id)}" type="button">
+        <strong>${escapeHtml(plan.name)}</strong>
+        <span>${plan.snapshot.placements.length} 件商品 · ${plan.snapshot.yard.widthM} × ${plan.snapshot.yard.depthM} m</span>
+      </button>
+      <button class="icon-btn saved-plan-delete" data-plan-delete="${escapeHtml(plan.id)}" title="删除方案" type="button"><i data-lucide="trash-2" width="14" height="14"></i></button>
+    </div>`).join("");
+  targets.forEach((target) => {
+    target.innerHTML = markup;
+    target.querySelectorAll<HTMLButtonElement>("[data-plan-load]").forEach((button) => {
+      button.addEventListener("click", () => void loadSavedPlan(button.dataset.planLoad ?? ""));
+    });
+    target.querySelectorAll<HTMLButtonElement>("[data-plan-delete]").forEach((button) => {
+      button.addEventListener("click", () => deleteSavedPlan(button.dataset.planDelete ?? ""));
+    });
+  });
+  renderIcons();
+}
+
+function recordHistory(markDirty = true) {
   const next = serializePlan();
   const current = history[historyIndex];
   if (current && JSON.stringify(current) === JSON.stringify(next)) return;
@@ -1485,7 +1640,11 @@ function recordHistory() {
   history.push(clonePlan(next));
   if (history.length > 60) history.shift();
   historyIndex = history.length - 1;
-  localStorage.setItem("backyard-demo-plan", JSON.stringify(next));
+  if (markDirty) {
+    planDirty = true;
+    persistDraft();
+  }
+  updatePlanStateUi();
   updateHistoryButtons();
 }
 
@@ -1498,6 +1657,9 @@ async function undo() {
   if (historyIndex <= 0) return;
   historyIndex -= 1;
   await restorePlan(history[historyIndex]);
+  planDirty = true;
+  persistDraft();
+  updatePlanStateUi();
   updateHistoryButtons();
 }
 
@@ -1505,6 +1667,9 @@ async function redo() {
   if (historyIndex >= history.length - 1) return;
   historyIndex += 1;
   await restorePlan(history[historyIndex]);
+  planDirty = true;
+  persistDraft();
+  updatePlanStateUi();
   updateHistoryButtons();
 }
 
@@ -1522,23 +1687,188 @@ function decodePlan(value: string) {
   return JSON.parse(new TextDecoder().decode(bytes)) as PlanSnapshot;
 }
 
+function createBlankPlan(): PlanSnapshot {
+  return normalizePlan({ schemaVersion: 2, yard: { widthM: 8, depthM: 6 }, placements: [] });
+}
+
+function loadPlanStore() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PLAN_STORE_KEY) ?? "[]") as SavedPlanRecord[];
+    savedPlans = Array.isArray(parsed)
+      ? parsed.filter((plan) => plan?.id && plan?.name).map((plan) => ({
+          ...plan,
+          snapshot: normalizePlan(plan.snapshot),
+        }))
+      : [];
+    activePlanId = localStorage.getItem(ACTIVE_PLAN_KEY) ?? "";
+  } catch {
+    savedPlans = [];
+    activePlanId = "";
+  }
+}
+
+function saveCurrentPlan() {
+  const snapshot = serializePlan();
+  const now = Date.now();
+  const current = savedPlans.find((plan) => plan.id === activePlanId);
+  if (current) {
+    current.snapshot = snapshot;
+    current.updatedAt = now;
+  } else {
+    savedPlans.unshift({
+      id: activePlanId || crypto.randomUUID(),
+      name: activePlanName || "我的方案",
+      createdAt: now,
+      updatedAt: now,
+      snapshot,
+    });
+    activePlanId = savedPlans[0].id;
+  }
+  localStorage.removeItem(DRAFT_PLAN_KEY);
+  planDirty = false;
+  persistPlanStore();
+  renderSavedPlans();
+  showToast("方案已保存");
+}
+
+async function saveAsPlan() {
+  const name = window.prompt("请输入方案名称", `${activePlanName} 副本`);
+  if (!name?.trim()) return;
+  const now = Date.now();
+  activePlanId = crypto.randomUUID();
+  activePlanName = name.trim();
+  savedPlans.unshift({
+    id: activePlanId,
+    name: activePlanName,
+    createdAt: now,
+    updatedAt: now,
+    snapshot: serializePlan(),
+  });
+  planDirty = false;
+  localStorage.removeItem(DRAFT_PLAN_KEY);
+  persistPlanStore();
+  renderSavedPlans();
+  showToast("已另存为新方案");
+}
+
+async function loadSavedPlan(planId: string) {
+  const plan = savedPlans.find((item) => item.id === planId);
+  if (!plan || plan.id === activePlanId) return;
+  if (planDirty && !window.confirm("当前方案有未保存修改，确定放弃并切换吗？")) return;
+  activePlanId = plan.id;
+  activePlanName = plan.name;
+  planDirty = false;
+  localStorage.removeItem(DRAFT_PLAN_KEY);
+  history = [];
+  historyIndex = -1;
+  await restorePlan(plan.snapshot);
+  recordHistory(false);
+  persistPlanStore();
+  renderSavedPlans();
+  showToast(`已打开方案：${plan.name}`);
+}
+
+function deleteSavedPlan(planId: string) {
+  const plan = savedPlans.find((item) => item.id === planId);
+  if (!plan || !window.confirm(`确定删除“${plan.name}”吗？`)) return;
+  savedPlans = savedPlans.filter((item) => item.id !== planId);
+  if (planId === activePlanId) {
+    const next = savedPlans[0];
+    if (next) {
+      void loadSavedPlan(next.id);
+    } else {
+      activePlanId = crypto.randomUUID();
+      activePlanName = "我的方案 1";
+      planDirty = true;
+      void restorePlan(createBlankPlan()).then(() => {
+        history = [];
+        historyIndex = -1;
+        recordHistory(false);
+        persistPlanStore();
+        renderSavedPlans();
+      });
+    }
+  }
+  persistPlanStore();
+  renderSavedPlans();
+  showToast("方案已删除");
+}
+
+async function createNewPlan() {
+  if (planDirty && !window.confirm("当前方案有未保存修改，确定创建新方案并放弃吗？")) return;
+  const name = window.prompt("请输入新方案名称", `我的方案 ${savedPlans.length + 1}`);
+  if (!name?.trim()) return;
+  activePlanId = crypto.randomUUID();
+  activePlanName = name.trim();
+  const now = Date.now();
+  savedPlans.unshift({
+    id: activePlanId,
+    name: activePlanName,
+    createdAt: now,
+    updatedAt: now,
+    snapshot: createBlankPlan(),
+  });
+  planDirty = false;
+  localStorage.removeItem(DRAFT_PLAN_KEY);
+  await restorePlan(createBlankPlan());
+  history = [];
+  historyIndex = -1;
+  recordHistory(false);
+  persistPlanStore();
+  renderSavedPlans();
+  showToast("已创建新方案");
+}
+
 function loadInitialPlan() {
   try {
-    if (window.location.hash.length > 1) return decodePlan(window.location.hash.slice(1));
-    const saved = localStorage.getItem("backyard-demo-plan");
-    if (saved) return JSON.parse(saved) as PlanSnapshot;
+    loadPlanStore();
+    if (window.location.hash.length > 1) {
+      activePlanId = crypto.randomUUID();
+      activePlanName = "分享方案";
+      planDirty = true;
+      return normalizePlan(decodePlan(window.location.hash.slice(1)));
+    }
+    const active = savedPlans.find((plan) => plan.id === activePlanId) ?? savedPlans[0];
+    if (active) {
+      activePlanId = active.id;
+      activePlanName = active.name;
+      const draft = JSON.parse(localStorage.getItem(DRAFT_PLAN_KEY) ?? "null") as DraftPlanRecord | null;
+      if (draft?.planId === active.id) {
+        planDirty = true;
+        return normalizePlan(draft.snapshot);
+      }
+      planDirty = false;
+      return normalizePlan(active.snapshot);
+    }
+    const orphanDraft = JSON.parse(localStorage.getItem(DRAFT_PLAN_KEY) ?? "null") as DraftPlanRecord | null;
+    if (orphanDraft?.planId) {
+      activePlanId = orphanDraft.planId;
+      activePlanName = "我的方案 1";
+      planDirty = true;
+      return normalizePlan(orphanDraft.snapshot);
+    }
+    const legacy = localStorage.getItem("backyard-demo-plan");
+    if (legacy) {
+      activePlanId = crypto.randomUUID();
+      activePlanName = "我的方案 1";
+      planDirty = true;
+      return normalizePlan(JSON.parse(legacy) as PlanSnapshot);
+    }
   } catch {
     showToast("保存的方案无法读取，已载入示例布局");
   }
+  activePlanId = crypto.randomUUID();
+  activePlanName = "我的方案 1";
+  planDirty = true;
   if (shopifyCatalogConfigured) {
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       yard: { widthM: 8, depthM: 6 },
       placements: [],
     } satisfies PlanSnapshot;
   }
-  return {
-    schemaVersion: 1,
+  return normalizePlan({
+    schemaVersion: 2,
     yard: { widthM: 8, depthM: 6 },
     placements: [
       { instanceId: crypto.randomUUID(), productId: "dining-table", x: -1.05, z: -0.4, rotation: 0.08 },
@@ -1546,7 +1876,7 @@ function loadInitialPlan() {
       { instanceId: crypto.randomUUID(), productId: "planter", x: 2.7, z: -1.75, rotation: 0 },
       { instanceId: crypto.randomUUID(), productId: "fire-pit", x: 2.05, z: 1.25, rotation: 0 },
     ],
-  } satisfies PlanSnapshot;
+  });
 }
 
 function setTransformMode(mode: "translate" | "rotate") {
@@ -2024,9 +2354,26 @@ removeModelButton.addEventListener("click", async () => {
   }
 });
 
-element<HTMLButtonElement>("#save-plan").addEventListener("click", () => {
-  localStorage.setItem("backyard-demo-plan", JSON.stringify(serializePlan()));
-  showToast("方案已保存到本机浏览器");
+element<HTMLButtonElement>("#save-plan").addEventListener("click", saveCurrentPlan);
+element<HTMLButtonElement>("#save-as-plan").addEventListener("click", () => void saveAsPlan());
+element<HTMLButtonElement>("#new-plan").addEventListener("click", () => void createNewPlan());
+
+function openPlansModal() {
+  renderSavedPlans();
+  plansModal.hidden = false;
+  renderIcons();
+}
+
+function closePlansModal() {
+  plansModal.hidden = true;
+}
+
+openPlansButton.addEventListener("click", openPlansModal);
+closePlansButton.addEventListener("click", closePlansModal);
+modalNewPlanButton.addEventListener("click", () => void createNewPlan());
+modalSaveAsPlanButton.addEventListener("click", () => void saveAsPlan());
+plansModal.addEventListener("click", (event) => {
+  if (event.target === plansModal) closePlansModal();
 });
 
 element<HTMLButtonElement>("#share-plan").addEventListener("click", async () => {
@@ -2070,17 +2417,21 @@ function updateCartModeUi() {
 updateCartModeUi();
 
 addToCartButton.addEventListener("click", async () => {
-  const grouped = new Map<string, number>();
-  placements().forEach((item) => grouped.set(item.userData.productId, (grouped.get(item.userData.productId) ?? 0) + 1));
-  const planId = crypto.randomUUID();
+  const grouped = new Map<string, { product: ProductDefinition; quantity: number }>();
+  placements().forEach((item) => {
+    const product = getProduct(item.userData.productId);
+    if (!product) return;
+    const current = grouped.get(product.variantId);
+    grouped.set(product.variantId, { product, quantity: (current?.quantity ?? 0) + 1 });
+  });
+  const planId = activePlanId || crypto.randomUUID();
   const payload = {
-    items: [...grouped.entries()].flatMap(([productId, quantity]) => {
-      const product = getProduct(productId);
-      if (!product?.variantId.startsWith("gid://shopify/ProductVariant/")) return [];
+    items: [...grouped.values()].flatMap(({ product, quantity }) => {
+      if (!product.variantId.startsWith("gid://shopify/ProductVariant/")) return [];
       return [{
         id: product.variantId.split("/").pop(),
         quantity,
-        properties: { _backyard_plan_id: planId, _sku: product.sku },
+        properties: { _backyard_plan_id: planId, _backyard_plan_name: activePlanName, _sku: product.sku },
       }];
     }),
   };
@@ -2127,6 +2478,10 @@ window.addEventListener("keydown", (event) => {
     closeModelManager();
     return;
   }
+  if (event.key === "Escape" && !plansModal.hidden) {
+    closePlansModal();
+    return;
+  }
   if (
     event.key === "Escape" &&
     (catalogPanel.classList.contains("open") || planPanel.classList.contains("open"))
@@ -2151,8 +2506,7 @@ window.addEventListener("keydown", (event) => {
   }
   if (command && event.key.toLowerCase() === "s") {
     event.preventDefault();
-    localStorage.setItem("backyard-demo-plan", JSON.stringify(serializePlan()));
-    showToast("方案已保存到本机浏览器");
+    saveCurrentPlan();
   }
 });
 
@@ -2179,7 +2533,8 @@ async function initializeApp() {
   renderCatalog();
   await restorePlan(loadInitialPlan());
   fitCamera();
-  recordHistory();
+  renderSavedPlans();
+  recordHistory(false);
   updateHistoryButtons();
   appInitialized = true;
 }
